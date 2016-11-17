@@ -1,5 +1,5 @@
-import reset from '../../../common/script/ops/reset';
-import i18n from '../../../common/script/i18n';
+import reset from '../../../website/common/script/ops/reset';
+import i18n from '../../../website/common/script/i18n';
 import {
   generateUser,
   generateDaily,
@@ -75,5 +75,21 @@ describe('shared.ops.reset', () => {
     expect(user.tasksOrder.todos).to.be.empty;
     expect(user.tasksOrder.dailys).to.be.empty;
     expect(user.tasksOrder.rewards).to.be.empty;
+  });
+
+  it('keeps automaticAllocation false', () => {
+    user.preferences.automaticAllocation = false;
+
+    reset(user);
+
+    expect(user.preferences.automaticAllocation).to.be.false;
+  });
+
+  it('sets automaticAllocation to false when true', () => {
+    user.preferences.automaticAllocation = true;
+
+    reset(user);
+
+    expect(user.preferences.automaticAllocation).to.be.false;
   });
 });

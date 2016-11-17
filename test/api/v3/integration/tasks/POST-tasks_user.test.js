@@ -1,13 +1,15 @@
 import {
   generateUser,
+  sleep,
   translate as t,
+  server,
 } from '../../../../helpers/api-v3-integration.helper';
 import { v4 as generateUUID } from 'uuid';
 
 describe('POST /tasks/user', () => {
   let user;
 
-  before(async () => {
+  beforeEach(async () => {
     user = await generateUser();
   });
 
@@ -57,7 +59,7 @@ describe('POST /tasks/user', () => {
       let originalHabitsOrder = (await user.get('/user')).tasksOrder.habits;
       await expect(user.post('/tasks/user', {
         type: 'habit',
-      })).to.eventually.be.rejected.and.eql({ // this block is necessary
+      })).to.eventually.be.rejected.and.eql({
         code: 400,
         error: 'BadRequest',
         message: 'habit validation failed',
@@ -72,7 +74,7 @@ describe('POST /tasks/user', () => {
       await expect(user.post('/tasks/user', [
         {type: 'habit'}, // Missing text
         {type: 'habit', text: 'valid'}, // Valid
-      ])).to.eventually.be.rejected.and.eql({ // this block is necessary
+      ])).to.eventually.be.rejected.and.eql({
         code: 400,
         error: 'BadRequest',
         message: 'habit validation failed',
@@ -87,7 +89,7 @@ describe('POST /tasks/user', () => {
       await expect(user.post('/tasks/user', [
         {type: 'habit'}, // Missing text
         {type: 'habit', text: 'valid'}, // Valid
-      ])).to.eventually.be.rejected.and.eql({ // this block is necessary
+      ])).to.eventually.be.rejected.and.eql({
         code: 400,
         error: 'BadRequest',
         message: 'habit validation failed',
@@ -142,6 +144,132 @@ describe('POST /tasks/user', () => {
 
       expect(task).not.to.have.property('notValid');
     });
+
+    it('errors if alias already exists on another task', async () => {
+      await user.post('/tasks/user', { // first task that will succeed
+        type: 'habit',
+        text: 'todo text',
+        alias: 'alias',
+      });
+
+      await expect(user.post('/tasks/user', {
+        type: 'todo',
+        text: 'todo text',
+        alias: 'alias',
+      })).to.eventually.be.rejected.and.eql({
+        code: 400,
+        error: 'BadRequest',
+        message: 'todo validation failed',
+      });
+    });
+
+    it('errors if alias contains invalid values', async () => {
+      await expect(user.post('/tasks/user', {
+        type: 'todo',
+        text: 'todo text',
+        alias: 'short name!',
+      })).to.eventually.be.rejected.and.eql({
+        code: 400,
+        error: 'BadRequest',
+        message: 'todo validation failed',
+      });
+    });
+
+    it('errors if alias is a valid uuid', async () => {
+      await expect(user.post('/tasks/user', {
+        type: 'todo',
+        text: 'todo text',
+        alias: generateUUID(),
+      })).to.eventually.be.rejected.and.eql({
+        code: 400,
+        error: 'BadRequest',
+        message: 'todo validation failed',
+      });
+    });
+
+    it('errors if the same shortname is used on 2 or more tasks', async () => {
+      await expect(user.post('/tasks/user', [{
+        type: 'habit',
+        text: 'habit text',
+        alias: 'alias',
+      }, {
+        type: 'todo',
+        text: 'todo text',
+      }, {
+        type: 'todo',
+        text: 'todo text',
+        alias: 'alias',
+      }])).to.eventually.be.rejected.and.eql({
+        code: 400,
+        error: 'BadRequest',
+        message: t('taskAliasAlreadyUsed'),
+      });
+    });
+  });
+
+  context('sending task activity webhooks', () => {
+    before(async () => {
+      await server.start();
+    });
+
+    after(async () => {
+      await server.close();
+    });
+
+    it('sends task activity webhooks', async () => {
+      let uuid = generateUUID();
+
+      await user.post('/user/webhook', {
+        url: `http://localhost:${server.port}/webhooks/${uuid}`,
+        type: 'taskActivity',
+        enabled: true,
+        options: {
+          created: true,
+        },
+      });
+
+      let task = await user.post('/tasks/user', {
+        text: 'test habit',
+        type: 'habit',
+      });
+
+      await sleep();
+
+      let body = server.getWebhookData(uuid);
+
+      expect(body.task).to.eql(task);
+    });
+
+    it('sends a task activity webhook for each task', async () => {
+      let uuid = generateUUID();
+
+      await user.post('/user/webhook', {
+        url: `http://localhost:${server.port}/webhooks/${uuid}`,
+        type: 'taskActivity',
+        enabled: true,
+        options: {
+          created: true,
+        },
+      });
+
+      let tasks = await user.post('/tasks/user', [{
+        text: 'test habit',
+        type: 'habit',
+      }, {
+        text: 'test todo',
+        type: 'todo',
+      }]);
+
+      await sleep();
+
+      let taskBodies = [
+        server.getWebhookData(uuid),
+        server.getWebhookData(uuid),
+      ];
+
+      expect(taskBodies.find(body => body.task.id === tasks[0].id)).to.exist;
+      expect(taskBodies.find(body => body.task.id === tasks[1].id)).to.exist;
+    });
   });
 
   context('all types', () => {
@@ -162,6 +290,16 @@ describe('POST /tasks/user', () => {
       expect(task.reminders[0].id).to.eql(id1);
       expect(task.reminders[0].startDate).to.be.a('string'); // json doesn't have dates
       expect(task.reminders[0].time).to.be.a('string');
+    });
+
+    it('can create a task with a alias', async () => {
+      let task = await user.post('/tasks/user', {
+        text: 'test habit',
+        type: 'habit',
+        alias: 'a_alias012',
+      });
+
+      expect(task.alias).to.eql('a_alias012');
     });
   });
 

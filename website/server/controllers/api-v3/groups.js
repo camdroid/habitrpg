@@ -1,8 +1,7 @@
-import { authWithHeaders } from '../../middlewares/api-v3/auth';
+import { authWithHeaders } from '../../middlewares/auth';
 import Bluebird from 'bluebird';
 import _ from 'lodash';
 import {
-  INVITES_LIMIT,
   model as Group,
   basicFields as basicGroupFields,
 } from '../../models/group';
@@ -15,18 +14,37 @@ import {
   NotFound,
   BadRequest,
   NotAuthorized,
-} from '../../libs/api-v3/errors';
-import { removeFromArray } from '../../libs/api-v3/collectionManipulators';
-import * as firebase from '../../libs/api-v3/firebase';
-import { sendTxn as sendTxnEmail } from '../../libs/api-v3/email';
-import { encrypt } from '../../libs/api-v3/encryption';
-import common from '../../../../common';
-import sendPushNotification from '../../libs/api-v3/pushNotifications';
+} from '../../libs/errors';
+import { removeFromArray } from '../../libs/collectionManipulators';
+import { sendTxn as sendTxnEmail } from '../../libs/email';
+import { encrypt } from '../../libs/encryption';
+import { sendNotification as sendPushNotification } from '../../libs/pushNotifications';
+import pusher from '../../libs/pusher';
+
+/**
+ * @apiDefine GroupBodyInvalid
+ * @apiError (400) {BadRequest} GroupBodyInvalid A parameter in the group body was invalid.
+ */
+
+/**
+ * @apiDefine GroupNotFound
+ * @apiError (404) {NotFound} GroupNotFound The specified group could not be found.
+ */
+
+/**
+ * @apiDefine PartyNotFound
+ * @apiError (404) {NotFound} PartyNotFound The user's party could not be found.
+ */
+
+/**
+ * @apiDefine GroupLeader Group Leader
+ * The group leader can use this route.
+ */
+
 let api = {};
 
 /**
  * @api {post} /api/v3/groups Create group
- * @apiVersion 3.0.0
  * @apiName CreateGroup
  * @apiGroup Group
  *
@@ -66,20 +84,33 @@ api.createGroup = {
       _id: user._id,
       profile: {name: user.profile.name},
     };
-    res.respond(201, response); // do not remove chat flags data as we've just created the group
 
-    firebase.updateGroupData(savedGroup);
-    firebase.addUserToGroup(savedGroup._id, user._id);
+    let analyticsObject = {
+      uuid: user._id,
+      hitType: 'event',
+      category: 'behavior',
+      owner: true,
+      groupType: savedGroup.type,
+      privacy: savedGroup.privacy,
+      headers: req.headers,
+    };
+
+    if (savedGroup.privacy === 'public') {
+      analyticsObject.groupName = savedGroup.name;
+    }
+
+    res.analytics.track('join group', analyticsObject);
+
+    res.respond(201, response); // do not remove chat flags data as we've just created the group
   },
 };
 
 /**
  * @api {get} /api/v3/groups Get groups for a user
- * @apiVersion 3.0.0
  * @apiName GetGroups
  * @apiGroup Group
  *
- * @apiParam {string} type The type of groups to retrieve. Must be a query string representing a list of values like 'tavern,party'. Possible values are party, guilds, privateGuilds, publicGuilds, tavern
+ * @apiParam {String} type The type of groups to retrieve. Must be a query string representing a list of values like 'tavern,party'. Possible values are party, guilds, privateGuilds, publicGuilds, tavern
  *
  * @apiSuccess {Array} data An array of the requested groups
  */
@@ -106,13 +137,14 @@ api.getGroups = {
 
 /**
  * @api {get} /api/v3/groups/:groupId Get group
- * @apiVersion 3.0.0
  * @apiName GetGroup
  * @apiGroup Group
  *
- * @apiParam {string} groupId The group _id ('party' for the user party and 'habitrpg' for tavern are accepted)
+ * @apiParam {String} groupId The group _id ('party' for the user party and 'habitrpg' for tavern are accepted)
  *
  * @apiSuccess {Object} data The group object
+ *
+ * @apiUse GroupNotFound
  */
 api.getGroup = {
   method: 'GET',
@@ -127,27 +159,38 @@ api.getGroup = {
     let validationErrors = req.validationErrors();
     if (validationErrors) throw validationErrors;
 
-    let group = await Group.getGroup({user, groupId: req.params.groupId, populateLeader: false});
-    if (!group) throw new NotFound(res.t('groupNotFound'));
+    let groupId = req.params.groupId;
+    let group = await Group.getGroup({user, groupId, populateLeader: false});
+    if (!group) {
+      throw new NotFound(res.t('groupNotFound'));
+    }
 
-    group = Group.toJSONCleanChat(group, user);
+    let groupJson = Group.toJSONCleanChat(group, user);
+
+    if (groupJson.leader === user._id) {
+      groupJson.purchased.plan = group.purchased.plan.toObject();
+    }
+
     // Instead of populate we make a find call manually because of https://github.com/Automattic/mongoose/issues/3833
-    let leader = await User.findById(group.leader).select(nameFields).exec();
-    if (leader) group.leader = leader.toJSON({minimize: true});
+    let leader = await User.findById(groupJson.leader).select(nameFields).exec();
+    if (leader) groupJson.leader = leader.toJSON({minimize: true});
 
-    res.respond(200, group);
+    res.respond(200, groupJson);
   },
 };
 
 /**
  * @api {put} /api/v3/groups/:groupId Update group
- * @apiVersion 3.0.0
  * @apiName UpdateGroup
  * @apiGroup Group
  *
- * @apiParam {string} groupId The group _id ('party' for the user party and 'habitrpg' for tavern are accepted)
+ * @apiParam {String} groupId The group _id ('party' for the user party and 'habitrpg' for tavern are accepted)
  *
  * @apiSuccess {Object} data The updated group
+ *
+ * @apiUse GroupNotFound
+ *
+ * @apiPermission GroupLeader
  */
 api.updateGroup = {
   method: 'PUT',
@@ -180,20 +223,19 @@ api.updateGroup = {
       };
     }
     res.respond(200, response);
-
-    firebase.updateGroupData(savedGroup);
   },
 };
 
 /**
  * @api {post} /api/v3/groups/:groupId/join Join a group
- * @apiVersion 3.0.0
  * @apiName JoinGroup
  * @apiGroup Group
  *
  * @apiParam {UUID} groupId The group _id ('party' for the user party and 'habitrpg' for tavern are accepted)
  *
  * @apiSuccess {Object} data The joined group
+ *
+ * @apiUse GroupNotFound
  */
 api.joinGroup = {
   method: 'POST',
@@ -278,15 +320,29 @@ api.joinGroup = {
     if (leader) {
       response.leader = leader.toJSON({minimize: true});
     }
-    res.respond(200, response);
 
-    firebase.addUserToGroup(group._id, user._id);
+    let analyticsObject = {
+      uuid: user._id,
+      hitType: 'event',
+      category: 'behavior',
+      owner: false,
+      groupType: group.type,
+      privacy: group.privacy,
+      headers: req.headers,
+    };
+
+    if (group.privacy === 'public') {
+      analyticsObject.groupName = group.name;
+    }
+
+    res.analytics.track('join group', analyticsObject);
+
+    res.respond(200, response);
   },
 };
 
 /**
  * @api {post} /api/v3/groups/:groupId/reject Reject a group invitation
- * @apiVersion 3.0.0
  * @apiName RejectGroupInvite
  * @apiGroup Group
  *
@@ -329,16 +385,24 @@ api.rejectGroupInvite = {
   },
 };
 
+function _removeMessagesFromMember (member, groupId) {
+  if (member.newMessages[groupId]) {
+    delete member.newMessages[groupId];
+    member.markModified('newMessages');
+  }
+}
+
 /**
  * @api {post} /api/v3/groups/:groupId/leave Leave a group
- * @apiVersion 3.0.0
  * @apiName LeaveGroup
  * @apiGroup Group
  *
- * @apiParam {string} groupId The group _id ('party' for the user party and 'habitrpg' for tavern are accepted)
- * @apiParam {string="remove-all","keep-all"} keep Query parameter - Whether to keep or not challenges' tasks. Defaults to keep-all
+ * @apiParam {String} groupId The group _id ('party' for the user party and 'habitrpg' for tavern are accepted)
+ * @apiParam {String="remove-all","keep-all"} keep Query parameter - Whether to keep or not challenges' tasks. Defaults to keep-all
  *
  * @apiSuccess {Object} data An empty object
+ *
+ * @apiUse GroupNotFound
  */
 api.leaveGroup = {
   method: 'POST',
@@ -346,7 +410,6 @@ api.leaveGroup = {
   middlewares: [authWithHeaders()],
   async handler (req, res) {
     let user = res.locals.user;
-
     req.checkParams('groupId', res.t('groupIdRequired')).notEmpty();
     // When removing the user from challenges, should we keep the tasks?
     req.checkQuery('keep', res.t('keepOrRemoveAll')).optional().isIn(['keep-all', 'remove-all']);
@@ -354,10 +417,13 @@ api.leaveGroup = {
     let validationErrors = req.validationErrors();
     if (validationErrors) throw validationErrors;
 
-    let group = await Group.getGroup({user, groupId: req.params.groupId, fields: '-chat', requireMembership: true});
-    if (!group) throw new NotFound(res.t('groupNotFound'));
+    let groupId = req.params.groupId;
+    let group = await Group.getGroup({user, groupId, fields: '-chat', requireMembership: true});
+    if (!group) {
+      throw new NotFound(res.t('groupNotFound'));
+    }
 
-    // During quests, checke wheter user can leave
+    // During quests, check if user can leave
     if (group.type === 'party') {
       if (group.quest && group.quest.leader === user._id) {
         throw new NotAuthorized(res.t('questLeaderCannotLeaveGroup'));
@@ -369,6 +435,11 @@ api.leaveGroup = {
     }
 
     await group.leave(user, req.query.keep);
+
+    _removeMessagesFromMember(user, group._id);
+
+    await user.save();
+
     res.respond(200, {});
   },
 };
@@ -387,15 +458,18 @@ function _sendMessageToRemoved (group, removedUser, message) {
 
 /**
  * @api {post} /api/v3/groups/:groupId/removeMember/:memberId Remove a member from a group
- * @apiVersion 3.0.0
  * @apiName RemoveGroupMember
  * @apiGroup Group
  *
- * @apiParam {string} groupId The group _id ('party' for the user party and 'habitrpg' for tavern are accepted)
+ * @apiParam {String} groupId The group _id ('party' for the user party and 'habitrpg' for tavern are accepted)
  * @apiParam {UUID} memberId The _id of the member to remove
- * @apiParam {string} message Query parameter - The message to send to the removed members
+ * @apiParam {String} message Query parameter - The message to send to the removed members
  *
  * @apiSuccess {Object} data An empty object
+ *
+ * @apiPermission GroupLeader
+ *
+ * @apiUse GroupNotFound
  */
 api.removeGroupMember = {
   method: 'POST',
@@ -443,19 +517,24 @@ api.removeGroupMember = {
         group.quest.leader = undefined;
       } else if (group.quest && group.quest.members) {
         // remove member from quest
-        group.quest.members[member._id] = undefined;
+        delete group.quest.members[member._id];
         group.markModified('quest.members');
       }
 
       if (isInGroup === 'guild') {
         removeFromArray(member.guilds, group._id);
       }
-      if (isInGroup === 'party') member.party._id = undefined; // TODO remove quest information too? Use group.leave()?
+      if (isInGroup === 'party') {
+        // Tell the realtime clients that a user is being removed
+        // If the user that is being removed is still connected, they'll get disconnected automatically
+        pusher.trigger(`presence-group-${group._id}`, 'user-removed', {
+          userId: user._id,
+        });
 
-      if (member.newMessages[group._id]) {
-        member.newMessages[group._id] = undefined;
-        member.markModified('newMessages');
+        member.party._id = undefined; // TODO remove quest information too? Use group.leave()?
       }
+
+      _removeMessagesFromMember(member, group._id);
 
       if (group.quest && group.quest.active && group.quest.leader === member._id) {
         member.items.quests[group.quest.key] += 1;
@@ -465,8 +544,8 @@ api.removeGroupMember = {
         removeFromArray(member.invitations.guilds, { id: group._id });
       }
       if (isInvited === 'party') {
-        user.invitations.party = {};
-        user.markModified('invitations.party');
+        member.invitations.party = {};
+        member.markModified('invitations.party');
       }
     } else {
       throw new NotFound(res.t('groupMemberNotFound'));
@@ -509,7 +588,7 @@ async function _inviteByUUID (uuid, group, inviter, req, res) {
       let userParty = await Group.getGroup({user: userToInvite, groupId: 'party', fields: 'memberCount'});
 
       // Allow user to be invited to a new party when they're partying solo
-      if (userParty.memberCount !== 1) throw new NotAuthorized(res.t('userAlreadyInAParty'));
+      if (userParty && userParty.memberCount !== 1) throw new NotAuthorized(res.t('userAlreadyInAParty'));
     }
 
     userToInvite.invitations.party = {id: group._id, name: group.name, inviter: inviter._id};
@@ -537,11 +616,18 @@ async function _inviteByUUID (uuid, group, inviter, req, res) {
     sendTxnEmail(userToInvite, `invited-${groupTemplate}`, emailVars);
   }
 
-  sendPushNotification(
-    userToInvite,
-    common.i18n.t(group.type === 'guild' ? 'invitedGuild' : 'invitedParty'),
-    group.name
-  );
+  if (userToInvite.preferences.pushNotifications[`invited${groupLabel}`] !== false) {
+    let identifier = group.type === 'guild' ? 'invitedGuild' : 'invitedParty';
+    sendPushNotification(
+      userToInvite,
+      {
+        title: group.name,
+        message: res.t(identifier),
+        identifier,
+        payload: {groupID: group._id},
+      }
+    );
+  }
 
   let userInvited = await userToInvite.save();
   if (group.type === 'guild') {
@@ -559,6 +645,7 @@ async function _inviteByEmail (invite, group, inviter, req, res) {
   let userToContact = await User.findOne({$or: [
     {'auth.local.email': invite.email},
     {'auth.facebook.emails.value': invite.email},
+    {'auth.google.emails.value': invite.email},
   ]})
   .select({_id: true, 'preferences.emailNotifications': true})
   .exec();
@@ -593,18 +680,82 @@ async function _inviteByEmail (invite, group, inviter, req, res) {
 }
 
 /**
- * @api {post} /api/v3/groups/:groupId/invite Invite users to a group using their UUIDs or email addresses
- * @apiVersion 3.0.0
+ * @api {post} /api/v3/groups/:groupId/invite Invite users to a group
  * @apiName InviteToGroup
  * @apiGroup Group
+ * @apiDescription You can provide both `emails` and `uuids`, or just one. You must provide at least one.
  *
- * @apiParam {string} groupId The group _id ('party' for the user party and 'habitrpg' for tavern are accepted)
+ * @apiParam (Path) {String} groupId The group _id ('party' for the user party and 'habitrpg' for tavern are accepted)
  *
- * @apiParam {array} emails Body parameter - An array of emails addresses to invite (optional)
- * @apiParam {array} uuids Body parameter - An array of uuids to invite (optional)
- * @apiParam {string} inviter Body parameter - The inviters' name (optional)
+ * @apiParam (Body) {Object[]} [emails] An array of objects, each representing one email address to invite
+ * @apiParam (Body) {String} emails.email The email address of the user being invited.
+ * @apiParam (Body) {String} [emails.name] The name of the user being invited.
+ * @apiParam (Body) {Array} [uuids] An array of uuids to invite
  *
- * @apiSuccess {array} data The invites
+ * @apiParamExample {json} Emails
+ * {
+ *   "emails": [
+ *     {"email": "user-1@example.com"},
+ *     {"name": "User2", "email": "user-2@example.com"}
+ *   ]
+ * }
+ * @apiParamExample {json} User Ids
+ *   {
+ *     "uuids": ["user-id-of-existing-user", "user-id-of-another-existing-user"]
+ *   }
+ * @apiParamExample {json} User Ids and Emails
+ * {
+ *   "emails": [
+ *       {"email": "user-1@example.com"},
+ *       {"email": "user-2@example.com"}
+ *   ],
+ *   "uuids": ["user-id-of-existing-user"]
+ * }
+ *
+ * @apiSuccess {Array} data The invites
+ * @apiSuccess {Object} data[0] If the invitation was a user id, you'll receive back an object. You'll recieve one Object for each succesful user id invite.
+ * @apiSuccess {String} data[1] If the invitation was an email, you'll receive back the email. You'll recieve one String for each successful email invite.
+ *
+ * @apiSuccessExample {json} Successful Response with Emails
+ * {
+ *   "data": [
+ *      "user-1@example.com",
+ *      "user-2@exmaple.com"
+ *   ]
+ * }
+ *
+ * @apiSuccessExample {json} Successful Response with User Id
+ * {
+ *   "data": [
+ *     { id: 'the-id-of-the-invited-user', name: 'The group name', inviter: 'your-user-id' }
+ *   ]
+ * }
+ * @apiSuccessExample {json} Successful Response with User Ids and Emails
+ * {
+ *   "data": [
+ *     "user-1@example.com",
+ *     { id: 'the-id-of-the-invited-user', name: 'The group name', inviter: 'your-user-id' },
+ *     "user-2@exmaple.com"
+ *   ]
+ * }
+ *
+ * @apiUse GroupBodyInvalid
+ *
+ * @apiError (400) {BadRequest} NoEmailProvided An email address was not provided in the `emails` body
+ * param `Array`.
+ * @apiError (400) {BadRequest} UuidOrEmailOnly The `emails` and `uuids` params were both missing and/or a
+ * key other than `emails` or `uuids` was provided in the body param.
+ * @apiError (400) {BadRequest} CannotInviteSelf User id or email of invitee matches that of the inviter.
+ * @apiError (400) {BadRequest} MustBeArray The `uuids` or `emails` body param was not an array.
+ * @apiError (400) {BadRequest} TooManyInvites A max of 100 invites (combined emails and user ids) can
+ * be sent out at a time.
+ *
+ * @apiError (401) {NotAuthorized} UserAlreadyInvited The user has already been invited to the group.
+ * @apiError (401) {NotAuthorized} UserAlreadyInGroup The user is already a member of the group.
+ *
+ * @apiUse GroupNotFound
+ * @apiUse UserNotFound
+ * @apiUse PartyNotFound
  */
 api.inviteToGroup = {
   method: 'POST',
@@ -624,35 +775,9 @@ api.inviteToGroup = {
     let uuids = req.body.uuids;
     let emails = req.body.emails;
 
-    let uuidsIsArray = Array.isArray(uuids);
-    let emailsIsArray = Array.isArray(emails);
-
-    if (!uuids && !emails) {
-      throw new BadRequest(res.t('canOnlyInviteEmailUuid'));
-    }
+    Group.validateInvitations(uuids, emails, res);
 
     let results = [];
-    let totalInvites = 0;
-
-    if (uuids) {
-      if (!uuidsIsArray) {
-        throw new BadRequest(res.t('uuidsMustBeAnArray'));
-      } else {
-        totalInvites += uuids.length;
-      }
-    }
-
-    if (emails) {
-      if (!emailsIsArray) {
-        throw new BadRequest(res.t('emailsMustBeAnArray'));
-      } else {
-        totalInvites += emails.length;
-      }
-    }
-
-    if (totalInvites > INVITES_LIMIT) {
-      throw new BadRequest(res.t('canOnlyInviteMaxInvites', {maxInvites: INVITES_LIMIT}));
-    }
 
     if (uuids) {
       let uuidInvites = uuids.map((uuid) => _inviteByUUID(uuid, group, user, req, res));

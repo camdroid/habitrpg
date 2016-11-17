@@ -1,6 +1,8 @@
 import {
   generateUser,
+  sleep,
   translate as t,
+  server,
 } from '../../../../helpers/api-integration/v3';
 import { v4 as generateUUID } from 'uuid';
 
@@ -14,12 +16,28 @@ describe('POST /tasks/:id/score/:direction', () => {
   });
 
   context('all', () => {
-    it('requires a task id', async () => {
-      await expect(user.post('/tasks/123/score/up')).to.eventually.be.rejected.and.eql({
-        code: 400,
-        error: 'BadRequest',
-        message: t('invalidReqParams'),
+    it('can use an id to identify the task', async () => {
+      let todo = await user.post('/tasks/user', {
+        text: 'test todo',
+        type: 'todo',
+        alias: 'alias',
       });
+
+      let res = await user.post(`/tasks/${todo._id}/score/up`);
+
+      expect(res).to.be.ok;
+    });
+
+    it('can use a alias in place of the id', async () => {
+      let todo = await user.post('/tasks/user', {
+        text: 'test todo',
+        type: 'todo',
+        alias: 'alias',
+      });
+
+      let res = await user.post(`/tasks/${todo.alias}/score/up`);
+
+      expect(res).to.be.ok;
     });
 
     it('requires a task direction', async () => {
@@ -28,6 +46,40 @@ describe('POST /tasks/:id/score/:direction', () => {
         error: 'BadRequest',
         message: t('invalidReqParams'),
       });
+    });
+
+    it('sends task scored webhooks', async () => {
+      let uuid = generateUUID();
+      await server.start();
+
+      await user.post('/user/webhook', {
+        url: `http://localhost:${server.port}/webhooks/${uuid}`,
+        type: 'taskActivity',
+        enabled: true,
+        options: {
+          created: false,
+          scored: true,
+        },
+      });
+
+      let task = await user.post('/tasks/user', {
+        text: 'test habit',
+        type: 'habit',
+      });
+
+      await user.post(`/tasks/${task.id}/score/up`);
+
+      await sleep();
+
+      await server.close();
+
+      let body = server.getWebhookData(uuid);
+
+      expect(body.user).to.have.all.keys('_id', '_tmp', 'stats');
+      expect(body.user.stats).to.have.all.keys('hp', 'mp', 'exp', 'gp', 'lvl', 'class', 'points', 'str', 'con', 'int', 'per', 'buffs', 'training', 'maxHealth', 'maxMP', 'toNextLevel');
+      expect(body.task.id).to.eql(task.id);
+      expect(body.direction).to.eql('up');
+      expect(body.delta).to.be.greaterThan(0);
     });
   });
 

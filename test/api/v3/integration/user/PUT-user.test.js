@@ -36,6 +36,8 @@ describe('PUT /user', () => {
       backer: {'backer.tier': 10, 'backer.npc': 'Bilbo'},
       subscriptions: {'purchased.plan.extraMonths': 500, 'purchased.plan.consecutive.trinkets': 1000},
       'customization gem purchases': {'purchased.background.tavern': true, 'purchased.skin.bear': true},
+      notifications: [{type: 123}],
+      webhooks: {webhooks: [{url: 'https://foobar.com'}]},
     };
 
     each(protectedOperations, (data, testName) => {

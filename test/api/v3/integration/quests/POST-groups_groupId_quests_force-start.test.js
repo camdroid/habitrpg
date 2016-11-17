@@ -3,6 +3,7 @@ import {
   translate as t,
   generateUser,
 } from '../../../../helpers/api-v3-integration.helper';
+import Bluebird from 'bluebird';
 
 describe('POST /groups/:groupId/quests/force-start', () => {
   const PET_QUEST = 'whale';
@@ -14,7 +15,7 @@ describe('POST /groups/:groupId/quests/force-start', () => {
   beforeEach(async () => {
     let { group, groupLeader, members } = await createAndPopulateGroup({
       groupDetails: { type: 'party', privacy: 'private' },
-      members: 2,
+      members: 3,
     });
 
     questingGroup = group;
@@ -63,8 +64,9 @@ describe('POST /groups/:groupId/quests/force-start', () => {
     it('does not force start for a quest already underway', async () => {
       await leader.post(`/groups/${questingGroup._id}/quests/invite/${PET_QUEST}`);
       await partyMembers[0].post(`/groups/${questingGroup._id}/quests/accept`);
-      // quest will start after everyone has accepted
       await partyMembers[1].post(`/groups/${questingGroup._id}/quests/accept`);
+      // quest will start after everyone has accepted
+      await partyMembers[2].post(`/groups/${questingGroup._id}/quests/accept`);
 
       await expect(leader.post(`/groups/${questingGroup._id}/quests/force-start`))
       .to.eventually.be.rejected.and.eql({
@@ -121,6 +123,113 @@ describe('POST /groups/:groupId/quests/force-start', () => {
       expect(quest.members).to.eql({
         [`${leader._id}`]: true,
       });
+    });
+
+    it('cleans up user quest data for non-quest members', async () => {
+      let partyMemberThatRejects = partyMembers[1];
+      let partyMemberThatIgnores = partyMembers[2];
+
+      await leader.post(`/groups/${questingGroup._id}/quests/invite/${PET_QUEST}`);
+      await partyMembers[0].post(`/groups/${questingGroup._id}/quests/accept`);
+      await partyMemberThatRejects.post(`/groups/${questingGroup._id}/quests/reject`);
+
+      await leader.post(`/groups/${questingGroup._id}/quests/force-start`);
+
+      await Bluebird.delay(500);
+
+      await Promise.all([
+        partyMemberThatRejects.sync(),
+        partyMemberThatIgnores.sync(),
+      ]);
+
+      expect(partyMemberThatRejects.party.quest.RSVPNeeded).to.eql(false);
+      expect(partyMemberThatRejects.party.quest.key).to.not.exist;
+      expect(partyMemberThatRejects.party.quest.completed).to.not.exist;
+      expect(partyMemberThatIgnores.party.quest.RSVPNeeded).to.eql(false);
+      expect(partyMemberThatIgnores.party.quest.key).to.not.exist;
+      expect(partyMemberThatIgnores.party.quest.completed).to.not.exist;
+    });
+
+    it('removes users who have not accepted the quest from quest.members', async () => {
+      let partyMemberThatRejects = partyMembers[1];
+      let partyMemberThatIgnores = partyMembers[2];
+      let partyMemberThatAccepts = partyMembers[0];
+
+      await leader.post(`/groups/${questingGroup._id}/quests/invite/${PET_QUEST}`);
+      await partyMemberThatAccepts.post(`/groups/${questingGroup._id}/quests/accept`);
+      await partyMemberThatRejects.post(`/groups/${questingGroup._id}/quests/reject`);
+
+      await leader.post(`/groups/${questingGroup._id}/quests/force-start`);
+
+      await Bluebird.delay(500);
+
+      await questingGroup.sync();
+
+      expect(questingGroup.quest.members[partyMemberThatRejects._id]).to.not.exist;
+      expect(questingGroup.quest.members[partyMemberThatIgnores._id]).to.not.exist;
+      expect(questingGroup.quest.members[partyMemberThatAccepts._id]).to.exist;
+      expect(questingGroup.quest.members[leader._id]).to.exist;
+    });
+
+    it('removes users who are not in the party from quest.members', async () => {
+      await leader.post(`/groups/${questingGroup._id}/quests/invite/${PET_QUEST}`);
+      let notInPartyUser = await generateUser();
+
+      await questingGroup.update({
+        [`quest.members.${notInPartyUser._id}`]: true,
+      });
+      await questingGroup.sync();
+
+      expect(questingGroup.quest.members[notInPartyUser._id]).to.eql(true);
+
+      await leader.post(`/groups/${questingGroup._id}/quests/force-start`);
+
+      await Bluebird.delay(500);
+
+      await questingGroup.sync();
+
+      expect(questingGroup.quest.members[notInPartyUser._id]).to.not.exist;
+    });
+
+    it('removes users who have been deleted from quest.members', async () => {
+      await leader.post(`/groups/${questingGroup._id}/quests/invite/${PET_QUEST}`);
+      await partyMembers[0].post(`/groups/${questingGroup._id}/quests/accept`);
+
+      await partyMembers[0].del('/user', {
+        password: 'password',
+      });
+
+      await leader.post(`/groups/${questingGroup._id}/quests/force-start`);
+
+      await Bluebird.delay(500);
+
+      await questingGroup.sync();
+
+      expect(questingGroup.quest.members[partyMembers[0]._id]).to.not.exist;
+    });
+
+    it('removes users who don\'t have true value in quest.members from quest.members', async () => {
+      let partyMemberThatRejects = partyMembers[1];
+      let partyMemberThatIgnores = partyMembers[2];
+
+      await leader.post(`/groups/${questingGroup._id}/quests/invite/${PET_QUEST}`);
+      await partyMembers[0].post(`/groups/${questingGroup._id}/quests/accept`);
+
+      await questingGroup.update({
+        [`quest.members.${partyMemberThatRejects._id}`]: false,
+        [`quest.members.${partyMemberThatIgnores._id}`]: null,
+      });
+
+      await leader.post(`/groups/${questingGroup._id}/quests/force-start`);
+
+      await Bluebird.delay(500);
+
+      await questingGroup.sync();
+
+      expect(questingGroup.quest.members[partyMemberThatRejects._id]).to.not.exist;
+      expect(questingGroup.quest.members[partyMemberThatIgnores._id]).to.not.exist;
+      expect(questingGroup.quest.members[partyMembers[0]._id]).to.exist;
+      expect(questingGroup.quest.members[leader._id]).to.exist;
     });
   });
 });

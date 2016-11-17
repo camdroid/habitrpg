@@ -13,6 +13,8 @@
 
   // Icons only available if you own the tasks (aka, hidden from challenge stats)
   span(ng-if='!obj._locked')
+    group-task-meta-actions(ng-if="obj.type == 'guild'", task='task', group='obj')
+    
     a(ng-click='pushTask(task,$index,"top")', tooltip=env.t('pushTaskToTop'), ng-class="{'push-down': ctrlPressed}")
       span(ng-hide="ctrlPressed").glyphicon.glyphicon-open
       span(ng-show="ctrlPressed").glyphicon.glyphicon-save
@@ -27,11 +29,11 @@
       | &nbsp;
       span.glyphicon.glyphicon-pencil(ng-hide='task._editing')
     | &nbsp;
-    a(ng-hide='!task._editing', ng-click='editTask(task, user)', tooltip=env.t('cancel'))
+    a(ng-hide='!task._editing', ng-click='cancelTaskEdit(task)', tooltip=env.t('cancel'))
       span.glyphicon.glyphicon-remove(ng-hide='!task._editing')
       | &nbsp;
     // save
-    a(ng-hide='!task._editing', ng-click='editTask(task, user);saveTask(task)', tooltip=env.t('save'))
+    a(ng-hide='!task._editing', ng-click='saveTask(task)', tooltip=env.t('save'))
       span.glyphicon.glyphicon-ok(ng-hide='!task._editing')
     | &nbsp;
     //challenges
@@ -53,7 +55,7 @@
       | &nbsp;
     // notes
 
-  // Make this icon available regardless of task ownership  
+  // Make this icon available regardless of task ownership
   a.task-notes(ng-show='task.notes && !task._editing', ng-click='task.popoverOpen = !task.popoverOpen', popover-trigger='click', data-popover-html="{{task.notes | markdown}}", popover-placement="top", popover-append-to-body='{{::modal ? "false":"true"}}')
     span.glyphicon.glyphicon-comment
     | &nbsp;

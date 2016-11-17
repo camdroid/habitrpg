@@ -3,13 +3,14 @@ import {
   generateGroup,
   sleep,
   generateChallenge,
+  server,
 } from '../../../../helpers/api-integration/v3';
 import { v4 as generateUUID } from 'uuid';
 
 describe('PUT /tasks/:id', () => {
   let user;
 
-  before(async () => {
+  beforeEach(async () => {
     user = await generateUser();
   });
 
@@ -59,7 +60,7 @@ describe('PUT /tasks/:id', () => {
       expect(savedTask.notValid).to.be.undefined;
     });
 
-    it(`only allows setting streak, reminders, checklist, notes, attribute, tags
+    it(`only allows setting streak, alias, reminders, checklist, notes, attribute, tags
         fields for challenge tasks owned by a user`, async () => {
       let guild = await generateGroup(user);
       let challenge = await generateChallenge(user, guild);
@@ -73,6 +74,7 @@ describe('PUT /tasks/:id', () => {
         checklist: [
           {text: 123, completed: false},
         ],
+        collapseChecklist: false,
       });
       await sleep(2);
 
@@ -87,6 +89,7 @@ describe('PUT /tasks/:id', () => {
         _id: 123,
         type: 'daily',
         userId: 123,
+        alias: 'a-short-task-name',
         history: [123],
         createdAt: 'yesterday',
         updatedAt: 'tomorrow',
@@ -109,6 +112,7 @@ describe('PUT /tasks/:id', () => {
           {text: 123, completed: false},
           {text: 456, completed: true},
         ],
+        collapseChecklist: true,
         notes: 'new notes',
         attribute: 'per',
         tags: [challengeUserTaskId],
@@ -141,6 +145,83 @@ describe('PUT /tasks/:id', () => {
       expect(savedChallengeUserTask.streak).to.equal(25);
       expect(savedChallengeUserTask.reminders.length).to.equal(2);
       expect(savedChallengeUserTask.checklist.length).to.equal(2);
+      expect(savedChallengeUserTask.alias).to.equal('a-short-task-name');
+      expect(savedChallengeUserTask.collapseChecklist).to.equal(true);
+    });
+  });
+
+  context('sending task activity webhooks', () => {
+    before(async () => {
+      await server.start();
+    });
+
+    after(async () => {
+      await server.close();
+    });
+
+    it('sends task activity webhooks if task is user owned', async () => {
+      let uuid = generateUUID();
+
+      await user.post('/user/webhook', {
+        url: `http://localhost:${server.port}/webhooks/${uuid}`,
+        type: 'taskActivity',
+        enabled: true,
+        options: {
+          created: false,
+          updated: true,
+        },
+      });
+
+      let task = await user.post('/tasks/user', {
+        text: 'test habit',
+        type: 'habit',
+      });
+
+      let updatedTask = await user.put(`/tasks/${task.id}`, {
+        text: 'updated text',
+      });
+
+      await sleep();
+
+      let body = server.getWebhookData(uuid);
+
+      expect(body.type).to.eql('updated');
+      expect(body.task).to.eql(updatedTask);
+    });
+
+    it('does not send task activity webhooks if task is not user owned', async () => {
+      let uuid = generateUUID();
+
+      await user.update({
+        balance: 10,
+      });
+      let guild = await generateGroup(user);
+      let challenge = await generateChallenge(user, guild);
+
+      await user.post('/user/webhook', {
+        url: `http://localhost:${server.port}/webhooks/${uuid}`,
+        type: 'taskActivity',
+        enabled: true,
+        options: {
+          created: false,
+          updated: true,
+        },
+      });
+
+      let task = await user.post(`/tasks/challenge/${challenge._id}`, {
+        text: 'test habit',
+        type: 'habit',
+      });
+
+      await user.put(`/tasks/${task.id}`, {
+        text: 'updated text',
+      });
+
+      await sleep();
+
+      let body = server.getWebhookData(uuid);
+
+      expect(body).to.not.exist;
     });
   });
 
@@ -175,6 +256,44 @@ describe('PUT /tasks/:id', () => {
       expect(savedDaily.reminders.length).to.equal(2);
       expect(savedDaily.reminders[0].id).to.equal(id1);
       expect(savedDaily.reminders[1].id).to.equal(id2);
+    });
+
+    it('can set a alias if no other task has that alias', async () => {
+      let savedDaily = await user.put(`/tasks/${daily._id}`, {
+        alias: 'alias',
+      });
+
+      expect(savedDaily.alias).to.eql('alias');
+    });
+
+    it('does not set alias to a alias that is already in use', async () => {
+      await user.post('/tasks/user', {
+        type: 'todo',
+        text: 'a todo',
+        alias: 'some-alias',
+      });
+
+      await expect(user.put(`/tasks/${daily._id}`, {
+        alias: 'some-alias',
+      })).to.eventually.be.rejected.and.eql({
+        code: 400,
+        error: 'BadRequest',
+        message: 'daily validation failed',
+      });
+    });
+
+    it('can use alias to update a task', async () => {
+      daily = await user.put(`/tasks/${daily._id}`, {
+        alias: 'alias',
+      });
+
+      await user.put(`/tasks/${daily.alias}`, {
+        text: 'saved',
+      });
+
+      let fetchedDaily = await user.get(`/tasks/${daily._id}`);
+
+      expect(fetchedDaily.text).to.eql('saved');
     });
   });
 

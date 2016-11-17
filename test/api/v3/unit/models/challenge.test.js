@@ -2,7 +2,7 @@ import { model as Challenge } from '../../../../../website/server/models/challen
 import { model as Group } from '../../../../../website/server/models/group';
 import { model as User } from '../../../../../website/server/models/user';
 import * as Tasks from '../../../../../website/server/models/task';
-import common from '../../../../../common/';
+import common from '../../../../../website/common/';
 import { each, find } from 'lodash';
 
 describe('Challenge Model', () => {
@@ -13,10 +13,12 @@ describe('Challenge Model', () => {
       type: 'habit',
       up: false,
       down: true,
+      notes: 'test notes',
     },
     todo: {
       text: 'test todo',
       type: 'todo',
+      notes: 'test notes',
     },
     daily: {
       text: 'test daily',
@@ -24,10 +26,12 @@ describe('Challenge Model', () => {
       frequency: 'daily',
       everyX: 5,
       startDate: new Date(),
+      notes: 'test notes',
     },
     reward: {
       text: 'test reward',
       type: 'reward',
+      notes: 'test notes',
     },
   };
 
@@ -77,6 +81,7 @@ describe('Challenge Model', () => {
         });
 
         expect(syncedTask).to.exist;
+        expect(syncedTask.notes).to.eql(task.notes);
       });
 
       it('syncs a challenge to a user', async () => {
@@ -96,8 +101,8 @@ describe('Challenge Model', () => {
         });
 
         expect(updatedNewMember.challenges).to.contain(challenge._id);
-        expect(updatedNewMember.tags[3].id).to.equal(challenge._id);
-        expect(updatedNewMember.tags[3].name).to.equal(challenge.shortName);
+        expect(updatedNewMember.tags[7].id).to.equal(challenge._id);
+        expect(updatedNewMember.tags[7].name).to.equal(challenge.shortName);
         expect(syncedTask).to.exist;
       });
 
@@ -156,6 +161,77 @@ describe('Challenge Model', () => {
         expect(syncedTask).to.exist;
         expect(syncedTask.challenge._id).to.be.empty;
       });
+    });
+  });
+
+  context('type specific updates', () => {
+    it('updates habit specific field to challenge and challenge members', async () => {
+      task = new Tasks.habit(Tasks.Task.sanitize(tasksToTest.habit)); // eslint-disable-line babel/new-cap
+      task.challenge.id = challenge._id;
+      await task.save();
+
+      await challenge.addTasks([task]);
+
+      task.up = true;
+      task.down = false;
+
+      await challenge.updateTask(task);
+
+      let updatedLeader = await User.findOne({_id: leader._id});
+      let updatedUserTask = await Tasks.Task.findById(updatedLeader.tasksOrder.habits[0]);
+
+      expect(updatedUserTask.up).to.equal(true);
+      expect(updatedUserTask.down).to.equal(false);
+    });
+
+    it('updates todo specific field to challenge and challenge members', async () => {
+      task = new Tasks.todo(Tasks.Task.sanitize(tasksToTest.todo)); // eslint-disable-line babel/new-cap
+      task.challenge.id = challenge._id;
+      await task.save();
+
+      await challenge.addTasks([task]);
+
+      task.date = new Date();
+      await challenge.updateTask(task);
+
+      let updatedLeader = await User.findOne({_id: leader._id});
+      let updatedUserTask = await Tasks.Task.findById(updatedLeader.tasksOrder.todos[0]);
+
+      expect(updatedUserTask.date).to.exist;
+    });
+
+    it('does not update checklists on the user task', async () => {
+      task = new Tasks.todo(Tasks.Task.sanitize(tasksToTest.todo)); // eslint-disable-line babel/new-cap
+      task.challenge.id = challenge._id;
+      await task.save();
+
+      await challenge.addTasks([task]);
+
+      task.checklist.push({
+        text: 'a new checklist',
+      });
+      await challenge.updateTask(task);
+
+      let updatedLeader = await User.findOne({_id: leader._id});
+      let updatedUserTask = await Tasks.Task.findById(updatedLeader.tasksOrder.todos[0]);
+
+      expect(updatedUserTask.checklist.toObject()).to.deep.equal([]);
+    });
+
+    it('updates daily specific field to challenge and challenge members', async () => {
+      task = new Tasks.daily(Tasks.Task.sanitize(tasksToTest.daily)); // eslint-disable-line babel/new-cap
+      task.challenge.id = challenge._id;
+      await task.save();
+
+      await challenge.addTasks([task]);
+
+      task.everyX = 2;
+      await challenge.updateTask(task);
+
+      let updatedLeader = await User.findOne({_id: leader._id});
+      let updatedUserTask = await Tasks.Task.findById(updatedLeader.tasksOrder.dailys[0]);
+
+      expect(updatedUserTask.everyX).to.eql(2);
     });
   });
 });

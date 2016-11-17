@@ -25,7 +25,7 @@ describe('POST /user/rebirth', () => {
 
   it('resets user\'s tasks', async () => {
     await user.update({
-      balance: 2,
+      balance: 1.5,
     });
 
     let daily = await generateDaily({
@@ -45,6 +45,9 @@ describe('POST /user/rebirth', () => {
 
     let response = await user.post('/user/rebirth');
     await user.sync();
+
+    expect(user.notifications.length).to.equal(1);
+    expect(user.notifications[0].type).to.equal('REBIRTH_ACHIEVEMENT');
 
     let updatedDaily = await user.get(`/tasks/${daily._id}`);
     let updatedReward = await user.get(`/tasks/${reward._id}`);
